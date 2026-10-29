@@ -32,13 +32,23 @@ KOI's tenant UI does not support streaming sessions to external systems as a bui
 │  - poller.py            │
 └────────────┬────────────┘
              │ NDJSON POST (gzip compressed)
-             │ Authorization: API key
+             │ Authorization: API ***
              ▼
 ┌─────────────────────────┐
 │   XSIAM HTTP Collector  │
 │   https://api-{tenant}  │
 │   /logs/v1/event        │
 └─────────────────────────┘
+
+## Knowledge Graph
+
+An automated knowledge graph of the codebase is available in the `graphify-out/` directory (generated with [`graphify`](https://github.com/safishamsi/graphify)). It includes:
+
+- Interactive HTML visualization: `graphify-out/graph.html`
+- Plain-language report: `graphify-out/GRAPH_REPORT.md`
+- Raw graph data: `graphify-out/graph.json`
+
+The graph reveals core abstractions, surprising connections, and suggested questions for deeper understanding. See the report for details.
 ```
 
 ### Key Design Decisions

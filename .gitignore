@@ -26,3 +26,5 @@ tests/
 
 # Logs
 *.logtests/
+# graphify outputs
+graphify-out/
