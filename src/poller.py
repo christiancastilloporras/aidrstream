@@ -45,7 +45,6 @@ logger = logging.getLogger(__name__)
 KOI_API_URL = os.environ.get("KOI_API_URL", "https://api.prod.koi.security/api/external/v2")
 KOI_API_KEY = os.environ.get("KOI_API_KEY", "")
 XSIAM_URL = os.environ.get("XSIAM_URL", "")
-XSIAM_API_KEY_ID = os.environ.get("XSIAM_API_KEY_ID", "")
 XSIAM_API_KEY = os.environ.get("XSIAM_API_KEY", "")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 KOI_PAGE_SIZE = int(os.environ.get("KOI_PAGE_SIZE", "100"))
@@ -256,9 +255,6 @@ def main() -> None:
     if not XSIAM_URL:
         logger.error("XSIAM_URL environment variable is required")
         sys.exit(1)
-    if not XSIAM_API_KEY_ID:
-        logger.error("XSIAM_API_KEY_ID environment variable is required")
-        sys.exit(1)
     if not XSIAM_API_KEY:
         logger.error("XSIAM_API_KEY environment variable is required")
         sys.exit(1)
@@ -275,7 +271,6 @@ def main() -> None:
 
     xsiam_client = XsiamHttpCollectorClient(
         url=XSIAM_URL,
-        api_key_id=XSIAM_API_KEY_ID,
         api_key=XSIAM_API_KEY,
     )
 

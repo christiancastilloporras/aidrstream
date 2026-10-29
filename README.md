@@ -31,7 +31,7 @@ KOI's tenant UI does not support streaming sessions to external systems as a bui
 │  - xsiam_client.py      │
 │  - poller.py            │
 └────────────┬────────────┘
-             │ NDJSON POST
+             │ NDJSON POST (gzip compressed)
              │ Authorization: API key
              ▼
 ┌─────────────────────────┐
@@ -58,7 +58,8 @@ KOI's tenant UI does not support streaming sessions to external systems as a bui
 - KOI API key (create in KOI UI: Settings > API Access > Create New API Key)
 - XSIAM HTTP collector configured with:
   - Collector URL (e.g., `https://api-{tenant}/logs/v1/event`)
-  - API key
+  - API key token
+  - GZIP compression + JSON format
 
 ## Setup
 
@@ -67,7 +68,7 @@ KOI's tenant UI does not support streaming sessions to external systems as a bui
    ```bash
    cp example.env .env
    ```
-3. Edit `.env` and fill in your KOI API key, XSIAM URL, and XSIAM API key
+3. Edit `.env` and fill in your KOI API key, XSIAM URL, and XSIAM API key token
 4. Start the poller:
    ```bash
    docker compose up -d
@@ -82,8 +83,7 @@ All configuration is done via environment variables in `.env`:
 | `KOI_API_URL` | KOI API base URL | `https://api.prod.koi.security/api/external/v2` |
 | `KOI_API_KEY` | KOI API bearer token | _required_ |
 | `XSIAM_URL` | XSIAM HTTP collector endpoint | _required_ |
-| `XSIAM_API_KEY_ID` | XSIAM API key ID (numeric) | _required_ |
-| `XSIAM_API_KEY` | XSIAM API key secret | _required_ |
+| `XSIAM_API_KEY` | XSIAM HTTP collector API key token | _required_ |
 | `POLL_INTERVAL_SECONDS` | Poll interval in seconds | `300` (5 min) |
 | `KOI_PAGE_SIZE` | KOI API page size | `100` (max 500) |
 

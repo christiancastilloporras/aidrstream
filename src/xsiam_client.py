@@ -2,9 +2,8 @@
 Cortex XSIAM HTTP Log Collector client.
 
 API: https://api-{tenant_external_url}/logs/v1/event
-Auth: Two headers required:
-  - x-xdr-auth-id: API key ID (numeric)
-  - Authorization: API key secret value
+Auth: Single header:
+  - Authorization: API key token
 Content-Type: application/json (uncompressed) or application/gzip (compressed)
 Body: Newline-delimited JSON (one event per line), optionally GZIP compressed
 
@@ -16,7 +15,6 @@ import requests
 import logging
 import json
 import gzip
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +23,8 @@ class XsiamHttpCollectorClient:
     """Client for sending events to the Cortex XSIAM HTTP Log Collector.
 
     Authentication:
-    XSIAM HTTP collector requires two headers:
-    - x-xdr-auth-id: The API key ID (numeric identifier)
-    - Authorization: The API key secret value
-
-    These are obtained from the XSIAM UI when you generate an API key
-    (Settings > Integrations > API Keys).
+    XSIAM HTTP collector uses a single Authorization header with the API key token.
+    The token is obtained from the XSIAM UI (Data Sources & Integrations > HTTP Collector).
 
     Compression:
     The collector configuration determines whether gzip is used.
@@ -41,7 +35,6 @@ class XsiamHttpCollectorClient:
     def __init__(
         self,
         url: str,
-        api_key_id: str,
         api_key: str,
         timeout: int = 30,
         compression: str = "gzip",
@@ -51,13 +44,11 @@ class XsiamHttpCollectorClient:
 
         Args:
             url: XSIAM HTTP collector endpoint URL (e.g., https://api-{tenant}/logs/v1/event)
-            api_key_id: API key ID (sent as x-xdr-auth-id header)
-            api_key: API key secret (sent as Authorization header)
+            api_key: API key token (sent as Authorization header)
             timeout: HTTP request timeout in seconds
             compression: Compression method ("gzip" or None for uncompressed)
         """
         self.url = url.rstrip("/")
-        self.api_key_id = api_key_id
         self.api_key = api_key
         self.timeout = timeout
         self.compression = compression
@@ -94,7 +85,6 @@ class XsiamHttpCollectorClient:
         body = "\n".join(body_lines)
 
         headers = {
-            "x-xdr-auth-id": str(self.api_key_id),
             "Authorization": self.api_key,
         }
 
