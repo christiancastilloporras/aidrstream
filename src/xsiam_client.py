@@ -4,14 +4,18 @@ Cortex XSIAM HTTP Log Collector client.
 API: https://api-{tenant_external_url}/logs/v1/event
 Auth: Two headers required:
   - x-xdr-auth-id: API key ID (numeric)
-  - Authorization: API secret value
-Content-Type: application/json (or text/plain for Raw format)
-Body: Newline-delimited JSON (one event per line)
+  - Authorization: API key secret value
+Content-Type: application/json (uncompressed) or application/gzip (compressed)
+Body: Newline-delimited JSON (one event per line), optionally GZIP compressed
+
+The XSIAM HTTP collector is configured with GZIP compression and JSON format,
+so we compress the NDJSON body and set Content-Encoding: gzip.
 """
 
 import requests
 import logging
 import json
+import gzip
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -26,7 +30,12 @@ class XsiamHttpCollectorClient:
     - Authorization: The API key secret value
 
     These are obtained from the XSIAM UI when you generate an API key
-    (Settings → Integrations → API Keys).
+    (Settings > Integrations > API Keys).
+
+    Compression:
+    The collector configuration determines whether gzip is used.
+    Currently the collector is configured with GZIP compression, so
+    the body is gzip-compressed and Content-Type is application/gzip.
     """
 
     def __init__(
@@ -35,6 +44,7 @@ class XsiamHttpCollectorClient:
         api_key_id: str,
         api_key: str,
         timeout: int = 30,
+        compression: str = "gzip",
     ):
         """
         Initialize the XSIAM HTTP collector client.
@@ -44,17 +54,22 @@ class XsiamHttpCollectorClient:
             api_key_id: API key ID (sent as x-xdr-auth-id header)
             api_key: API key secret (sent as Authorization header)
             timeout: HTTP request timeout in seconds
+            compression: Compression method ("gzip" or None for uncompressed)
         """
         self.url = url.rstrip("/")
         self.api_key_id = api_key_id
         self.api_key = api_key
         self.timeout = timeout
+        self.compression = compression
 
     def send_events(self, events: list[dict]) -> bool:
         """Send a batch of events to the XSIAM HTTP collector.
 
         Events are sent as newline-delimited JSON (NDJSON format).
-        The request body can contain up to 10MB (1MB recommended per XSIAM docs).
+        When compression is enabled, the body is gzip-compressed.
+
+        The request body can contain up to 10MB uncompressed (1MB recommended
+        per XSIAM docs).
 
         Args:
             events: List of event dictionaries to send
@@ -81,22 +96,37 @@ class XsiamHttpCollectorClient:
         headers = {
             "x-xdr-auth-id": str(self.api_key_id),
             "Authorization": self.api_key,
-            "Content-Type": "application/json",
         }
 
-        logger.debug(f"Sending {len(events)} events to XSIAM ({len(body)} bytes)")
+        # Apply compression based on collector configuration
+        if self.compression == "gzip":
+            compressed_body = gzip.compress(body.encode("utf-8"))
+            headers["Content-Type"] = "application/gzip"
+            headers["Content-Encoding"] = "gzip"
+            payload = compressed_body
+            logger.debug(
+                f"Sending {len(events)} events to XSIAM "
+                f"(compressed: {len(body)} -> {len(payload)} bytes)"
+            )
+        else:
+            headers["Content-Type"] = "application/json"
+            payload = body.encode("utf-8")
+            logger.debug(f"Sending {len(events)} events to XSIAM ({len(payload)} bytes)")
+
         try:
             response = requests.post(
                 self.url,
                 headers=headers,
-                data=body.encode("utf-8"),
+                data=payload,
                 timeout=self.timeout,
             )
             response.raise_for_status()
             logger.info(f"Successfully sent {len(events)} events to XSIAM")
             return True
         except requests.exceptions.HTTPError as e:
-            logger.error(f"XSIAM HTTP error sending events: {e.response.status_code} {e.response.text}")
+            logger.error(
+                f"XSIAM HTTP error sending events: {e.response.status_code} {e.response.text}"
+            )
             return False
         except requests.exceptions.RequestException as e:
             logger.error(f"XSIAM request error: {e}")
