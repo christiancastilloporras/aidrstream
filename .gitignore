@@ -15,6 +15,9 @@ env/
 data/
 *.db
 
+# Tests (kept local only)
+tests/
+
 # IDE
 .vscode/
 .idea/

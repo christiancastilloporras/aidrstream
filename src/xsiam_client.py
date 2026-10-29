@@ -2,8 +2,10 @@
 Cortex XSIAM HTTP Log Collector client.
 
 API: https://api-{tenant_external_url}/logs/v1/event
-Auth: API key in Authorization header
-Content-Type: application/json
+Auth: Two headers required:
+  - x-xdr-auth-id: API key ID (numeric)
+  - Authorization: API secret value
+Content-Type: application/json (or text/plain for Raw format)
 Body: Newline-delimited JSON (one event per line)
 """
 
@@ -16,11 +18,21 @@ logger = logging.getLogger(__name__)
 
 
 class XsiamHttpCollectorClient:
-    """Client for sending events to the Cortex XSIAM HTTP Log Collector."""
+    """Client for sending events to the Cortex XSIAM HTTP Log Collector.
+
+    Authentication:
+    XSIAM HTTP collector requires two headers:
+    - x-xdr-auth-id: The API key ID (numeric identifier)
+    - Authorization: The API key secret value
+
+    These are obtained from the XSIAM UI when you generate an API key
+    (Settings → Integrations → API Keys).
+    """
 
     def __init__(
         self,
         url: str,
+        api_key_id: str,
         api_key: str,
         timeout: int = 30,
     ):
@@ -28,11 +40,13 @@ class XsiamHttpCollectorClient:
         Initialize the XSIAM HTTP collector client.
 
         Args:
-            url: XSIAM HTTP collector endpoint URL
-            api_key: API key for authentication
+            url: XSIAM HTTP collector endpoint URL (e.g., https://api-{tenant}/logs/v1/event)
+            api_key_id: API key ID (sent as x-xdr-auth-id header)
+            api_key: API key secret (sent as Authorization header)
             timeout: HTTP request timeout in seconds
         """
         self.url = url.rstrip("/")
+        self.api_key_id = api_key_id
         self.api_key = api_key
         self.timeout = timeout
 
@@ -65,6 +79,7 @@ class XsiamHttpCollectorClient:
         body = "\n".join(body_lines)
 
         headers = {
+            "x-xdr-auth-id": str(self.api_key_id),
             "Authorization": self.api_key,
             "Content-Type": "application/json",
         }
