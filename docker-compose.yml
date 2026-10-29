@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  koi-xsiam-poller:
+    build: .
+    container_name: koi-xsiam-poller
+    env_file:
+      - .env
+    volumes:
+      - koi-state:/data
+    restart: unless-stopped
+
+volumes:
+  koi-state:
