@@ -175,9 +175,10 @@ def poll_cycle(
         logger.info(f"Resuming from HWM: {last_hwm}")
         start_dt = parse_iso_timestamp(last_hwm)
     else:
-        # First run: use a default lookback of 5 minutes
-        logger.info("First run — starting from 5 minutes ago")
-        start_dt = get_utc_now() - timedelta(minutes=5)
+        # First run: use the configured poll interval as the initial lookback window
+        # This ensures the fetch window matches the wait interval between cycles
+        logger.info(f"First run — starting from {POLL_INTERVAL // 60} minutes ago")
+        start_dt = get_utc_now() - timedelta(seconds=POLL_INTERVAL)
 
     end_dt = get_utc_now()
 
