@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  koi-xsiam-poller:
+    image: ccastilloporras/aidrstream:latest
+    container_name: koi-xsiam-poller
+    env_file:
+      - .env
+    volumes:
+      - koi-state:/data
+    restart: unless-stopped
+
+volumes:
+  koi-state:
