@@ -6,6 +6,8 @@ services:
     container_name: koi-xsiam-poller
     env_file:
       - .env
+    environment:
+      - TZ=America/Mexico_City
     volumes:
       - koi-state:/data
     restart: unless-stopped
