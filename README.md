@@ -73,6 +73,12 @@ The graph reveals core abstractions, surprising connections, and suggested quest
 
 ## Setup
 
+Choose one of two options to run the poller:
+
+### Option 1: Build from source (local build)
+
+Use this for development, testing, or custom modifications:
+
 1. Clone this repository
 2. Copy `example.env` to `.env`:
    ```bash
@@ -83,6 +89,28 @@ The graph reveals core abstractions, surprising connections, and suggested quest
    ```bash
    docker compose up -d
    ```
+
+### Option 2: Use pre-built image (recommended for production)
+
+A pre-built image is published on Docker Hub as `ccastilloporras/aidrstream:latest`. Use this no-setup-required production compose file instead:
+
+```bash
+cp example.env .env
+# edit .env with your credentials
+docker compose -f docker-compose.prod.yml up -d
+```
+
+| Option | `docker-compose.yml` | `docker-compose.prod.yml` |
+|---|---|---|
+| Source | Builds from local Dockerfile | Pulls `ccastilloporras/aidrstream:latest` |
+| Best for | Development, forking, custom builds | Production, standard deployment |
+| Updates | Rebuild image manually | `docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d --force-recreate` |
+
+The pre-built image is kept up to date with the `main` branch. To receive updates, pull the latest image before recreating:
+```bash
+docker compose -f docker-compose.prod.yml pull && \
+docker compose -f docker-compose.prod.yml up -d --force-recreate
+```
 
 ## Configuration
 
