@@ -56,9 +56,10 @@ The graph reveals core abstractions, surprising connections, and suggested quest
 | Concern | Solution |
 |---------|----------|
 | Near-realtime | 5-minute poll interval (configurable via `POLL_INTERVAL_SECONDS`) |
-| No session loss | High-water mark (HWM) stored in SQLite volume |
-| No duplicates | HWM timestamp + boundary ID set deduplication |
-| 24h window limit | Automatic window chunking if HWM is stale |
+| No session loss | Sticky `window_from`. Empty polls do not move it |
+| No duplicates | Session ids forwarded in the last 24 hours are skipped |
+| Empty poll | `window_to` advances by `POLL_INTERVAL_SECONDS`, capped at now |
+| 24h window limit | Automatic window chunking if the sticky start is older than 24 hours |
 | State persistence | SQLite in Docker volume mounted at `/data` |
 | Container reproducibility | Docker Compose, single service, `.env` for secrets |
 
@@ -128,6 +129,7 @@ All configuration is done via environment variables in `.env`:
 ## KOI API Constraints (Enforced)
 
 - Time window (`created_at_gte` to `created_at_lte`) is required
+- Empty polls keep `created_at_gte` and only move `created_at_lte` forward by one poll interval (never into the future)
 - Maximum window: 24 hours (auto-chunked if exceeded)
 - End time cannot be in the future
 - Page size: 1–100 default, max 500

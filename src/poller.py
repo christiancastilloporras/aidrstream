@@ -6,8 +6,8 @@ in near-realtime (default: poll every 5 minutes).
 
 Key design decisions:
 - Uses KOI /agent-activity/sessions endpoint
-- High-water mark (HWM) tracking via SQLite to prevent duplicates
-- Deduplication at the boundary timestamp (handles multiple sessions created in the same second)
+- Sticky query window: empty polls keep created_at_gte and step created_at_lte by one interval
+- Day-scoped session_id dedup so a re-read window only forwards new sessions
 - Respects KOI's 24-hour time window constraint
 - Polls every 5 minutes (configurable via POLL_INTERVAL_SECONDS)
 - Forwards raw session JSON to XSIAM (parsing rules can be added in XSIAM if needed)
@@ -79,30 +79,48 @@ def parse_iso_timestamp(ts: str) -> datetime:
     return dt
 
 
-def deduplicate_sessions(sessions: list[dict], known_ids: set[str]) -> list[dict]:
-    """Filter out sessions whose session_id is in the known_ids set.
+def advance_window(
+    had_new_sessions: bool,
+    window_from: datetime,
+    window_to: datetime,
+    now: datetime,
+    poll_interval_seconds: int,
+    newest_start: Optional[datetime],
+) -> tuple[datetime, datetime]:
+    """Return the next (from, to) query cursor.
 
-    Args:
-        sessions: List of session dicts from KOI API
-        known_ids: Set of session IDs that have already been processed
-
-    Returns:
-        List of new (non-duplicate) session dicts
+    Empty or duplicate-only polls keep `from` and step `to` by one interval.
+    A poll that forwarded sessions moves `from` to the newest forwarded start_time
+    and sets `to` to now.
     """
-    if not known_ids:
-        return sessions
+    if had_new_sessions and newest_start is not None:
+        return newest_start, now
 
-    new_sessions = []
-    for s in sessions:
-        sid = s.get("session_id")
-        if sid and sid not in known_ids:
-            new_sessions.append(s)
+    stepped = window_to + timedelta(seconds=poll_interval_seconds)
+    if stepped > now:
+        stepped = now
+    if stepped < window_from:
+        stepped = window_from
+    return window_from, stepped
 
-    skipped = len(sessions) - len(new_sessions)
-    if skipped > 0:
-        logger.debug(f"Deduplication: skipped {skipped} already-seen sessions")
 
-    return new_sessions
+def select_unsent(sessions: list[dict], already_sent: set[str]) -> list[dict]:
+    """Keep sessions whose session_id was not forwarded in the retention window.
+
+    Sessions with no session_id are dropped: they cannot be deduped safely.
+    """
+    chosen = []
+    for session in sessions:
+        sid = session.get("session_id")
+        if not sid or sid in already_sent:
+            continue
+        chosen.append(session)
+    return chosen
+
+
+def newest_start_time(sessions: list[dict]) -> Optional[datetime]:
+    stamps = [parse_iso_timestamp(s["start_time"]) for s in sessions if s.get("start_time")]
+    return max(stamps) if stamps else None
 
 
 def fetch_sessions_for_window(
@@ -159,85 +177,78 @@ def poll_cycle(
     xsiam_client: XsiamHttpCollectorClient,
     state_manager: StateManager,
 ) -> None:
-    """Execute one complete poll cycle.
+    """Execute one poll.
 
-    1. Read HWM from state
-    2. Fetch sessions since HWM (respecting 24h window)
-    3. Deduplicate against known IDs at boundary
-    4. Forward to XSIAM
-    5. Update state with new HWM
+    Empty polls keep window_from and step window_to by one interval.
+    Forwarded sessions move window_from to the newest start_time.
+    A failed send leaves both the cursor and the sent-id set unchanged.
     """
-    # --- Step 1: Read state ---
-    last_hwm = state_manager.get_last_hwm()
-    known_ids = state_manager.get_last_seen_ids()
+    now = get_utc_now()
+    state_manager.prune_sent_ids(older_than_hours=MAX_WINDOW_HOURS)
 
-    if last_hwm:
-        logger.info(f"Resuming from HWM: {last_hwm}")
-        start_dt = parse_iso_timestamp(last_hwm)
+    window_from_s, window_to_s = state_manager.get_window()
+    if window_from_s:
+        start_dt = parse_iso_timestamp(window_from_s)
+        logger.info(f"Resuming from window_from: {window_from_s}")
     else:
-        # First run: use the configured poll interval as the initial lookback window
-        # This ensures the fetch window matches the wait interval between cycles
         logger.info(f"First run — starting from {POLL_INTERVAL // 60} minutes ago")
-        start_dt = get_utc_now() - timedelta(seconds=POLL_INTERVAL)
+        start_dt = now - timedelta(seconds=POLL_INTERVAL)
 
-    end_dt = get_utc_now()
+    if window_to_s:
+        end_dt = parse_iso_timestamp(window_to_s) + timedelta(seconds=POLL_INTERVAL)
+    else:
+        end_dt = now
+    if end_dt > now:
+        end_dt = now
 
-    # --- Step 2: Fetch sessions ---
     sessions = fetch_sessions_for_window(koi_client, start_dt, end_dt)
-
-    if not sessions:
-        logger.info("No new sessions found in this poll cycle")
-        return
-
-    # --- Step 3: Deduplicate ---
-    new_sessions = deduplicate_sessions(sessions, known_ids)
+    already_sent = state_manager.get_sent_ids_within(hours=MAX_WINDOW_HOURS)
+    new_sessions = select_unsent(sessions, already_sent)
 
     if not new_sessions:
-        logger.info("All sessions were duplicates — state will still be updated")
-        # Even if all are duplicates, update the HWM to avoid re-reading
-        # the same window on the next poll
-    else:
-        logger.info(f"Forwarding {len(new_sessions)} new sessions to XSIAM (of {len(sessions)} fetched)")
+        logger.info(
+            "No new sessions in %s -> %s; keeping from, advancing to",
+            iso_format(start_dt),
+            iso_format(end_dt),
+        )
+        new_from, new_to = advance_window(
+            had_new_sessions=False,
+            window_from=start_dt,
+            window_to=end_dt,
+            now=now,
+            poll_interval_seconds=POLL_INTERVAL,
+            newest_start=None,
+        )
+        state_manager.save_window(iso_format(new_from), iso_format(new_to))
+        return
 
-    # --- Step 4: Forward to XSIAM ---
-    if new_sessions:
-        # Enrich with _time field for XSIAM
-        for s in new_sessions:
-            if "start_time" in s:
-                s["_time"] = s["start_time"]
-            s["source_log_type"] = "koi_agent_activity_session"
+    for session in new_sessions:
+        if "start_time" in session:
+            session["_time"] = session["start_time"]
+        session["source_log_type"] = "koi_agent_activity_session"
 
-        success = xsiam_client.send_events(new_sessions)
-        if not success:
-            logger.error("Failed to send events to XSIAM — state will NOT be updated, events will be retried next cycle")
-            return
+    logger.info(f"Forwarding {len(new_sessions)} new sessions to XSIAM (of {len(sessions)} fetched)")
+    if not xsiam_client.send_events(new_sessions):
+        logger.error("Failed to send events to XSIAM — window and sent-ids will NOT be updated")
+        return
 
-    # --- Step 5: Update state (HWM + dedup IDs) ---
-    # The HWM is the start_time of the last session in the fetched window.
-    # We also collect all session IDs that share this timestamp to prevent
-    # duplicates on the next poll (in case sessions are created within the same second).
-
-    # Sort sessions by start_time to find the true high-water mark
-    sorted_sessions = sorted(sessions, key=lambda s: s.get("start_time", ""))
-
-    new_hwm = sorted_sessions[-1].get("start_time", iso_format(end_dt))
-    new_hwm_dt = parse_iso_timestamp(new_hwm)
-
-    # Collect IDs at the HWM timestamp
-    hwm_ids: set[str] = set()
-    for s in sorted_sessions:
-        ts = s.get("start_time", "")
-        if ts == new_hwm:
-            sid = s.get("session_id")
-            if sid:
-                hwm_ids.add(sid)
-
-    # If the HWM hasn't changed, merge with previous known IDs
-    if last_hwm and last_hwm == new_hwm:
-        hwm_ids = hwm_ids | known_ids
-
-    state_manager.save_state(hwm=new_hwm, seen_ids=hwm_ids)
-    logger.info(f"Poll cycle complete. New HWM: {new_hwm}")
+    newest = newest_start_time(new_sessions)
+    if newest is None:
+        logger.warning("Forwarded sessions have no start_time; window_from will not move")
+    new_from, new_to = advance_window(
+        had_new_sessions=True,
+        window_from=start_dt,
+        window_to=end_dt,
+        now=now,
+        poll_interval_seconds=POLL_INTERVAL,
+        newest_start=newest,
+    )
+    sent_at = iso_format(now)
+    ids = [s["session_id"] for s in new_sessions if s.get("session_id")]
+    state_manager.record_sent_ids(ids, sent_at=sent_at)
+    state_manager.save_window(iso_format(new_from), iso_format(new_to))
+    state_manager.save_state(hwm=iso_format(new_from), seen_ids=set(ids))
+    logger.info(f"Poll cycle complete. Window {iso_format(new_from)} -> {iso_format(new_to)}")
 
 
 def main() -> None:
