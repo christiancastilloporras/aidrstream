@@ -7,8 +7,8 @@ Streams KOI (Agentic Endpoint Security) AI agent sessions into Cortex XSIAM HTTP
 KOI's tenant UI does not support streaming sessions to external systems as a built-in feature. This poller fills that gap by:
 
 1. Polling the KOI `/agent-activity/sessions` API every 5 minutes
-2. Tracking a high-water mark (HWM) in SQLite to avoid losing sessions between polls
-3. Deduplicating sessions created within the same timestamp
+2. Starting each UTC day at 00:00:00 and only stepping `created_at_lte` forward per poll
+3. Deduplicating sessions already forwarded in the last 24 hours
 4. Forwarding raw session JSON to the XSIAM HTTP Log Collector endpoint
 
 ## Architecture
@@ -56,10 +56,10 @@ The graph reveals core abstractions, surprising connections, and suggested quest
 | Concern | Solution |
 |---------|----------|
 | Near-realtime | 5-minute poll interval (configurable via `POLL_INTERVAL_SECONDS`) |
-| No session loss | Sticky `window_from`. Empty polls do not move it |
+| No session loss | Daily start at 00:00:00 UTC; empty polls keep created_at_gte |
 | No duplicates | Session ids forwarded in the last 24 hours are skipped |
-| Empty poll | `window_to` advances by `POLL_INTERVAL_SECONDS`, capped at now |
-| 24h window limit | Automatic window chunking if the sticky start is older than 24 hours |
+| Empty poll | `created_at_lte` advances by `POLL_INTERVAL_SECONDS`, capped at now |
+| 24h window limit | Automatic windowing/chunking if the day exceeds 24 hours |
 | State persistence | SQLite in Docker volume mounted at `/data` |
 | Container reproducibility | Docker Compose, single service, `.env` for secrets |
 
@@ -129,6 +129,7 @@ All configuration is done via environment variables in `.env`:
 ## KOI API Constraints (Enforced)
 
 - Time window (`created_at_gte` to `created_at_lte`) is required
+- Each UTC day resets `created_at_gte` to 00:00:00Z; only `created_at_lte` advances during the day
 - Empty polls keep `created_at_gte` and only move `created_at_lte` forward by one poll interval (never into the future)
 - Maximum window: 24 hours (auto-chunked if exceeded)
 - End time cannot be in the future

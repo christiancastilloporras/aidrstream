@@ -6,9 +6,10 @@ in near-realtime (default: poll every 5 minutes).
 
 Key design decisions:
 - Uses KOI /agent-activity/sessions endpoint
-- Sticky query window: empty polls keep created_at_gte and step created_at_lte by one interval
-- Day-scoped session_id dedup so a re-read window only forwards new sessions
-- Respects KOI's 24-hour time window constraint
+- Daily window: each UTC day starts at 00:00:00; only created_at_lte steps forward per poll
+- 24h sent_session_id dedup so re-read/overlapping windows never resend
+- Respects KOI's 24-hour time window constraint (auto-chunked)
+- State update is the last step: failed KOI fetch or XSIAM send leaves cursor unchanged
 - Polls every 5 minutes (configurable via POLL_INTERVAL_SECONDS)
 - Forwards raw session JSON to XSIAM (parsing rules can be added in XSIAM if needed)
 
@@ -61,6 +62,8 @@ def get_utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+
+
 def iso_format(dt: datetime) -> str:
     """Format datetime as ISO 8601 string (XSIAM-compatible)."""
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -79,26 +82,34 @@ def parse_iso_timestamp(ts: str) -> datetime:
     return dt
 
 
+def day_boundary(now: datetime) -> datetime:
+    """UTC midnight of the given datetime's day — the daily query start."""
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def advance_window(
-    had_new_sessions: bool,
-    window_from: datetime,
-    window_to: datetime,
+    day_changed: bool,
+    prev_window_from: datetime,
+    prev_window_to: datetime,
     now: datetime,
     poll_interval_seconds: int,
+    had_new_sessions: bool,
     newest_start: Optional[datetime],
 ) -> tuple[datetime, datetime]:
     """Return the next (from, to) query cursor.
 
-    Empty or duplicate-only polls keep `from` and step `to` by one interval.
-    A poll that forwarded sessions moves `from` to the newest forwarded start_time
-    and sets `to` to now.
+    On a new UTC day, from resets to midnight and to is now.
+    Same day: from stays at the day boundary, to steps by one interval
+    (capped at now). Forwarded sessions do not move from — the sent-id
+    set absorbs the overlap.
     """
-    if had_new_sessions and newest_start is not None:
-        return newest_start, now
+    if day_changed:
+        return day_boundary(now), now
 
-    stepped = window_to + timedelta(seconds=poll_interval_seconds)
+    stepped = prev_window_to + timedelta(seconds=poll_interval_seconds)
     if stepped > now:
         stepped = now
+    window_from = day_boundary(now)
     if stepped < window_from:
         stepped = window_from
     return window_from, stepped
@@ -179,23 +190,22 @@ def poll_cycle(
 ) -> None:
     """Execute one poll.
 
-    Empty polls keep window_from and step window_to by one interval.
-    Forwarded sessions move window_from to the newest start_time.
-    A failed send leaves both the cursor and the sent-id set unchanged.
+    Each UTC day starts the query at 00:00:00 and only created_at_lte steps
+    forward by one poll interval. forwarded session ids are remembered for 24h
+    so an overlapping end never resends. A failed KOI fetch or XSIAM send leaves
+    both the cursor and the sent-id set unchanged.
     """
     now = get_utc_now()
     state_manager.prune_sent_ids(older_than_hours=MAX_WINDOW_HOURS)
 
-    window_from_s, window_to_s = state_manager.get_window()
-    if window_from_s:
-        start_dt = parse_iso_timestamp(window_from_s)
-        logger.info(f"Resuming from window_from: {window_from_s}")
-    else:
-        logger.info(f"First run — starting from {POLL_INTERVAL // 60} minutes ago")
-        start_dt = now - timedelta(seconds=POLL_INTERVAL)
+    prev_from_s, prev_to_s = state_manager.get_window()
+    prev_from = parse_iso_timestamp(prev_from_s) if prev_from_s else None
+    prev_to = parse_iso_timestamp(prev_to_s) if prev_to_s else None
+    day_changed = prev_from is None or prev_from.date() != now.date()
 
-    if window_to_s:
-        end_dt = parse_iso_timestamp(window_to_s) + timedelta(seconds=POLL_INTERVAL)
+    start_dt = day_boundary(now)
+    if prev_to is not None:
+        end_dt = prev_to + timedelta(seconds=POLL_INTERVAL)
     else:
         end_dt = now
     if end_dt > now:
@@ -205,50 +215,42 @@ def poll_cycle(
     already_sent = state_manager.get_sent_ids_within(hours=MAX_WINDOW_HOURS)
     new_sessions = select_unsent(sessions, already_sent)
 
-    if not new_sessions:
+    if new_sessions:
+        for session in new_sessions:
+            if "start_time" in session:
+                session["_time"] = session["start_time"]
+            session["source_log_type"] = "koi_agent_activity_session"
+
         logger.info(
-            "No new sessions in %s -> %s; keeping from, advancing to",
-            iso_format(start_dt),
-            iso_format(end_dt),
+            f"Forwarding {len(new_sessions)} new sessions to XSIAM "
+            f"(of {len(sessions)} fetched in {iso_format(start_dt)} -> {iso_format(end_dt)})"
         )
-        new_from, new_to = advance_window(
-            had_new_sessions=False,
-            window_from=start_dt,
-            window_to=end_dt,
-            now=now,
-            poll_interval_seconds=POLL_INTERVAL,
-            newest_start=None,
+        if not xsiam_client.send_events(new_sessions):
+            logger.error("Failed to send events to XSIAM — window and sent-ids will NOT be updated")
+            return
+
+        sent_at = iso_format(now)
+        ids = [s["session_id"] for s in new_sessions if s.get("session_id")]
+        state_manager.record_sent_ids(ids, sent_at=sent_at)
+    else:
+        logger.info(
+            f"No new sessions in {iso_format(start_dt)} -> {iso_format(end_dt)}; "
+            f"keeping from, advancing to"
         )
-        state_manager.save_window(iso_format(new_from), iso_format(new_to))
-        return
 
-    for session in new_sessions:
-        if "start_time" in session:
-            session["_time"] = session["start_time"]
-        session["source_log_type"] = "koi_agent_activity_session"
-
-    logger.info(f"Forwarding {len(new_sessions)} new sessions to XSIAM (of {len(sessions)} fetched)")
-    if not xsiam_client.send_events(new_sessions):
-        logger.error("Failed to send events to XSIAM — window and sent-ids will NOT be updated")
-        return
-
-    newest = newest_start_time(new_sessions)
-    if newest is None:
-        logger.warning("Forwarded sessions have no start_time; window_from will not move")
     new_from, new_to = advance_window(
-        had_new_sessions=True,
-        window_from=start_dt,
-        window_to=end_dt,
+        day_changed=day_changed,
+        prev_window_from=prev_from or now,
+        prev_window_to=prev_to or (now - timedelta(seconds=POLL_INTERVAL)),
         now=now,
         poll_interval_seconds=POLL_INTERVAL,
-        newest_start=newest,
+        had_new_sessions=bool(new_sessions),
+        newest_start=None,
     )
-    sent_at = iso_format(now)
-    ids = [s["session_id"] for s in new_sessions if s.get("session_id")]
-    state_manager.record_sent_ids(ids, sent_at=sent_at)
     state_manager.save_window(iso_format(new_from), iso_format(new_to))
-    state_manager.save_state(hwm=iso_format(new_from), seen_ids=set(ids))
-    logger.info(f"Poll cycle complete. Window {iso_format(new_from)} -> {iso_format(new_to)}")
+    # Keep the legacy key for rollback compatibility; it is not used for cursor logic.
+    state_manager.save_state(hwm=iso_format(new_from), seen_ids=set())
+    logger.info(f"Window: {iso_format(new_from)} -> {iso_format(new_to)}")
 
 
 def main() -> None:
