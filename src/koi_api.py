@@ -8,7 +8,7 @@ import requests
 import logging
 from typing import Optional
 
-from exceptions import TransientError
+from .exceptions import TransientError
 
 logger = logging.getLogger(__name__)
 

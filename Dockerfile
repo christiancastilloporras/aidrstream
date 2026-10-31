@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 
 # Create data directory for SQLite
-RUN mkdir -p /data
+RUN mkdir -p /data && chmod 777 /data
 
 # Run the poller
-CMD ["python", "src/poller.py"]
+CMD ["python", "-m", "src.poller"]

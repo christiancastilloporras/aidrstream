@@ -27,9 +27,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from koi_api import KoiApiClient
-from state import StateManager
-from xsiam_client import XsiamHttpCollectorClient
+from .koi_api import KoiApiClient
+from .state import StateManager
+from .xsiam_client import XsiamHttpCollectorClient
 
 # ---------------------------------------------------------------------------
 # Configuration

@@ -16,7 +16,7 @@ import logging
 import json
 import gzip
 
-from exceptions import TransientError
+from .exceptions import TransientError
 
 logger = logging.getLogger(__name__)
 
