@@ -6,7 +6,8 @@ in near-realtime (default: poll every 5 minutes).
 
 Key design decisions:
 - Uses KOI /agent-activity/sessions endpoint
-- Daily window: each UTC day starts at 00:00:00; only created_at_lte steps forward per poll
+- Daily window: each UTC day starts at 00:00:00; created_at_lte steps forward per poll
+  while created_at_gte advances by 1h every 2h (sliding safety buffer)
 - 24h sent_session_id dedup so re-read/overlapping windows never resend
 - Respects KOI's 24-hour time window constraint (auto-chunked)
 - State update is the last step: failed KOI fetch or XSIAM send leaves cursor unchanged
@@ -87,6 +88,32 @@ def day_boundary(now: datetime) -> datetime:
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def compute_window_from(now: datetime) -> datetime:
+    """Compute the query window start based on elapsed time since midnight.
+
+    The window start advances by 1 hour for every 2 hours elapsed since
+    UTC midnight. This keeps a sliding ~1h safety buffer so late-arriving
+    sessions from the previous window are still caught on the next poll,
+    while progressively reducing the overlap to bound the re-fetch volume.
+
+    On day change (handled by the caller), from resets to midnight.
+
+    Examples (UTC):
+        00:00 - 01:59  -> from = 00:00
+        02:00 - 03:59  -> from = 01:00
+        04:00 - 05:59  -> from = 02:00
+        ...
+    """
+    midnight = day_boundary(now)
+    elapsed_hours = (now - midnight).total_seconds() / 3600
+    from_hour = int(elapsed_hours // 2)  # advance 1h per 2h elapsed
+    window_from = midnight + timedelta(hours=from_hour)
+    # Never exceed now
+    if window_from > now:
+        window_from = midnight
+    return window_from
+
+
 def advance_window(
     day_changed: bool,
     prev_window_from: datetime,
@@ -99,7 +126,9 @@ def advance_window(
     """Return the next (from, to) query cursor.
 
     On a new UTC day, from resets to midnight and to is now.
-    Same day: from stays at the day boundary, to steps by one interval
+    Same day: from advances by 1 hour for every 2 hours elapsed since
+    midnight (computed from the current time, not poll count, so it stays
+    correct even if polls are missed). to steps by one poll interval
     (capped at now). Forwarded sessions do not move from — the sent-id
     set absorbs the overlap.
     """
@@ -109,7 +138,10 @@ def advance_window(
     stepped = prev_window_to + timedelta(seconds=poll_interval_seconds)
     if stepped > now:
         stepped = now
-    window_from = day_boundary(now)
+    # Compute the sliding window start; never move it backward
+    window_from = compute_window_from(now)
+    if window_from < prev_window_from:
+        window_from = prev_window_from
     if stepped < window_from:
         stepped = window_from
     return window_from, stepped
@@ -192,10 +224,11 @@ def poll_cycle(
 ) -> None:
     """Execute one poll.
 
-    Each UTC day starts the query at 00:00:00 and only created_at_lte steps
-    forward by one poll interval. forwarded session ids are remembered for 24h
-    so an overlapping end never resends. A failed KOI fetch or XSIAM send leaves
-    both the cursor and the sent-id set unchanged.
+    Each UTC day starts the query at 00:00:00; the from cursor advances by 1h
+    every 2h (sliding safety buffer) and to steps forward by one poll interval.
+    Forwarded session ids are remembered for 24h so an overlapping end never
+    resends. A failed KOI fetch or XSIAM send leaves the cursor and the sent-id
+    set unchanged.
     """
     now = get_utc_now()
     state_manager.prune_sent_ids(older_than_hours=MAX_WINDOW_HOURS)
