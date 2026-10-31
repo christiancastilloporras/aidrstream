@@ -16,6 +16,8 @@ import logging
 import json
 import gzip
 
+from exceptions import TransientError
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,7 +68,8 @@ class XsiamHttpCollectorClient:
             events: List of event dictionaries to send
 
         Returns:
-            True if successful, False otherwise
+            True if successful, False if the collector returned a 4xx error
+            (permanent failure). Raises TransientError on 5xx or network errors.
         """
         if not events:
             return True
@@ -114,10 +117,17 @@ class XsiamHttpCollectorClient:
             logger.info(f"Successfully sent {len(events)} events to XSIAM")
             return True
         except requests.exceptions.HTTPError as e:
-            logger.error(
-                f"XSIAM HTTP error sending events: {e.response.status_code} {e.response.text}"
-            )
-            return False
+            status = e.response.status_code
+            if status == 429 or 500 <= status < 600:
+                logger.error(
+                    f"XSIAM transient error sending events: {status} {e.response.text}"
+                )
+                raise TransientError(f"XSIAM transient error: {status}")
+            else:  # 4xx other than 429
+                logger.error(
+                    f"XSIAM permanent error sending events: {status} {e.response.text}"
+                )
+                return False
         except requests.exceptions.RequestException as e:
             logger.error(f"XSIAM request error: {e}")
-            return False
+            raise TransientError(str(e))

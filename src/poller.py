@@ -115,7 +115,7 @@ def advance_window(
     return window_from, stepped
 
 
-def select_unsent(sessions: list[dict], already_sent: set[str]) -> list[dict]:
+def select_unsent(sessions: list[dict], already_sent: set[tuple[str, str, str]]) -> list[dict]:
     """Keep sessions whose session_id was not forwarded in the retention window.
 
     Sessions with no session_id are dropped: they cannot be deduped safely.
@@ -123,7 +123,9 @@ def select_unsent(sessions: list[dict], already_sent: set[str]) -> list[dict]:
     chosen = []
     for session in sessions:
         sid = session.get("session_id")
-        if not sid or sid in already_sent:
+        host = session.get("host", "")
+        agent = session.get("agent", "")
+        if not sid or (sid, host, agent) in already_sent:
             continue
         chosen.append(session)
     return chosen
@@ -230,8 +232,7 @@ def poll_cycle(
             return
 
         sent_at = iso_format(now)
-        ids = [s["session_id"] for s in new_sessions if s.get("session_id")]
-        state_manager.record_sent_ids(ids, sent_at=sent_at)
+        state_manager.record_sent_ids(new_sessions, sent_at=sent_at)
     else:
         logger.info(
             f"No new sessions in {iso_format(start_dt)} -> {iso_format(end_dt)}; "

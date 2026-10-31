@@ -1,5 +1,4 @@
-"""
-KOI API client for fetching agent activity sessions.
+"""KOI API client for fetching agent activity sessions.
 
 API: https://api.prod.koi.security/api/external/v2/agent-activity/sessions
 Auth: Bearer token (API key)
@@ -8,6 +7,8 @@ Auth: Bearer token (API key)
 import requests
 import logging
 from typing import Optional
+
+from exceptions import TransientError
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,7 @@ class KoiApiClient:
         page_size: int = 100,
         timeout: int = 30,
     ):
-        """
-        Initialize the KOI API client.
+        """Initialize the KOI API client.
 
         Args:
             base_url: KOI API base URL (e.g., https://api.prod.koi.security/api/external/v2)
@@ -43,8 +43,7 @@ class KoiApiClient:
         page: int = 1,
         **filters: str,
     ) -> dict:
-        """
-        Fetch a single page of sessions from the KOI API.
+        """Fetch a single page of sessions from the KOI API.
 
         Args:
             created_at_gte: ISO 8601 timestamp — sessions created at or after this time
@@ -72,14 +71,24 @@ class KoiApiClient:
         }
 
         logger.debug(f"KOI API GET {url} params={params}")
-        response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"KOI API request exception: {e}")
+            raise TransientError(str(e)) from e
 
         if response.status_code == 429:
             # Rate limited — let the caller handle retry
             logger.warning(f"KOI API rate limited (429) on page {page}")
-            return {"data": [], "total_count": 0}
+            raise TransientError(f"KOI API rate limited (429) on page {page}")
 
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            # 5xx or other 4xx besides 429
+            logger.warning(f"KOI API HTTP error: {e.response.status_code} {e.response.text}")
+            raise TransientError(str(e)) from e
+
         result = response.json()
         logger.debug(f"KOI API response: {len(result.get('data', []))} sessions on page {page}")
         return result
@@ -90,8 +99,7 @@ class KoiApiClient:
         created_before: Optional[str] = None,
         max_pages: int = 100,
     ) -> list[dict]:
-        """
-        Fetch all sessions since a given timestamp, auto-paginating.
+        """Fetch all sessions since a given timestamp, auto-paginating.
 
         Args:
             created_after: ISO 8601 timestamp for created_at_gte filter

@@ -1,5 +1,4 @@
-"""
-SQLite-based state persistence for the KOI-to-XSIAM poller.
+"""SQLite-based state persistence for the KOI-to-XSIAM poller.
 
 Stores the high-water mark (HWM) timestamp and deduplication cache
 so sessions are never lost or duplicated between polls.
@@ -39,10 +38,14 @@ class StateManager:
                     value TEXT
                 )
             """)
+            conn.execute("DROP TABLE IF EXISTS sent_sessions")
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS sent_sessions (
-                    session_id TEXT PRIMARY KEY,
-                    sent_at    TEXT NOT NULL
+                CREATE TABLE sent_sessions (
+                    session_id TEXT NOT NULL,
+                    host TEXT NOT NULL DEFAULT '',
+                    agent TEXT NOT NULL DEFAULT '',
+                    sent_at TEXT NOT NULL,
+                    PRIMARY KEY (session_id, host, agent)
                 )
             """)
             conn.commit()
@@ -57,99 +60,98 @@ class StateManager:
         """
         with self._get_connection() as conn:
             row = conn.execute(
-                "SELECT value FROM poller_state WHERE key = ?", ("last_hwm",)
+                "SELECT value FROM poller_state WHERE key = 'last_hwm'"
             ).fetchone()
-            if row:
-                logger.debug(f"Last HWM: {row['value']}")
-                return row["value"]
-        return None
+        return row["value"] if row else None
 
     def get_last_seen_ids(self) -> set[str]:
-        """Retrieve the set of session IDs seen at the HWM timestamp.
+        """Retrieve the set of session_ids seen at the HWM timestamp.
 
         Returns:
-            Set of session_id strings. Empty set if none.
+            A set of session_id strings.
         """
         with self._get_connection() as conn:
             row = conn.execute(
-                "SELECT value FROM poller_state WHERE key = ?", ("last_seen_ids",)
+                "SELECT value FROM poller_state WHERE key = 'last_seen_ids'"
             ).fetchone()
-            if row and row["value"]:
-                return set(row["value"].split(","))
+        if row and row["value"]:
+            import json
+            return set(json.loads(row["value"]))
         return set()
 
     def save_state(self, hwm: str, seen_ids: set[str]) -> None:
-        """Persist the high-water mark and seen session IDs.
-
-        Args:
-            hwm: The new high-water mark timestamp (ISO 8601)
-            seen_ids: Set of session IDs observed at this timestamp
-        """
-        ids_str = ",".join(sorted(seen_ids)) if seen_ids else ""
-
+        """Save the high-water mark and the set of session_ids seen at that HWM."""
+        import json
         with self._get_connection() as conn:
-            conn.execute("""
-                INSERT INTO poller_state (key, value)
-                VALUES (?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """, ("last_hwm", hwm))
-            conn.execute("""
-                INSERT INTO poller_state (key, value)
-                VALUES (?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """, ("last_seen_ids", ids_str))
+            conn.execute(
+                "INSERT OR REPLACE INTO poller_state (key, value) VALUES (?, ?)",
+                ("last_hwm", hwm),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO poller_state (key, value) VALUES (?, ?)",
+                ("last_seen_ids", json.dumps(list(seen_ids))),
+            )
             conn.commit()
-        logger.info(f"State saved: HWM={hwm}, seen_ids_count={len(seen_ids)}")
 
     def get_window(self) -> tuple[Optional[str], Optional[str]]:
-        """Return (window_from, window_to). Falls back to last_hwm for from."""
+        """Retrieve the polling window (window_from, window_to) as ISO strings.
+
+        Returns:
+            Tuple of (window_from, window_to). Either can be None if not set.
+        """
         with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT key, value FROM poller_state WHERE key IN ('window_from', 'window_to', 'last_hwm')"
-            ).fetchall()
-        found = {row["key"]: row["value"] for row in rows}
-        return found.get("window_from") or found.get("last_hwm"), found.get("window_to")
+            row = conn.execute(
+                "SELECT value FROM poller_state WHERE key = 'window_from'"
+            ).fetchone()
+            window_from = row["value"] if row else None
+            row = conn.execute(
+                "SELECT value FROM poller_state WHERE key = 'window_to'"
+            ).fetchone()
+            window_to = row["value"] if row else None
+        return window_from, window_to
 
     def save_window(self, window_from: str, window_to: str) -> None:
-        """Persist the query cursor. Does not imply sessions were forwarded."""
+        """Save the polling window (window_from, window_to) as ISO strings."""
         with self._get_connection() as conn:
-            for key, val in (("window_from", window_from), ("window_to", window_to)):
-                conn.execute(
-                    """
-                    INSERT INTO poller_state (key, value)
-                    VALUES (?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    (key, val),
-                )
+            conn.execute(
+                "INSERT OR REPLACE INTO poller_state (key, value) VALUES (?, ?)",
+                ("window_from", window_from),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO poller_state (key, value) VALUES (?, ?)",
+                ("window_to", window_to),
+            )
             conn.commit()
-        logger.info(f"Window saved: from={window_from} to={window_to}")
 
-    def record_sent_ids(self, session_ids: list[str], sent_at: str) -> None:
+    def record_sent_ids(self, sessions: list[dict], sent_at: str) -> None:
         """Remember ids forwarded at sent_at. Repeat inserts keep the newest sent_at."""
-        rows = [(sid, sent_at) for sid in session_ids if sid]
+        rows = []
+        for session in sessions:
+            sid = session.get("session_id")
+            host = session.get("host", "")
+            agent = session.get("agent", "")
+            if sid:  # only record if we have a session_id
+                rows.append((sid, host, agent, sent_at))
         if not rows:
             return
         with self._get_connection() as conn:
             conn.executemany(
-                """
-                INSERT INTO sent_sessions (session_id, sent_at)
-                VALUES (?, ?)
-                ON CONFLICT(session_id) DO UPDATE SET sent_at = excluded.sent_at
-                """,
+                """INSERT INTO sent_sessions (session_id, host, agent, sent_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id, host, agent) DO UPDATE SET sent_at = excluded.sent_at""",
                 rows,
             )
             conn.commit()
 
-    def get_sent_ids_within(self, hours: int = 24) -> set[str]:
+    def get_sent_ids_within(self, hours: int = 24) -> set[tuple[str, str, str]]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         cutoff_s = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT session_id FROM sent_sessions WHERE sent_at >= ?",
+                """SELECT session_id, host, agent FROM sent_sessions WHERE sent_at >= ?""",
                 (cutoff_s,),
             ).fetchall()
-        return {row["session_id"] for row in rows}
+        return {(row["session_id"], row["host"], row["agent"]) for row in rows}
 
     def prune_sent_ids(self, older_than_hours: int = 24) -> int:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
@@ -160,4 +162,4 @@ class StateManager:
                 (cutoff_s,),
             )
             conn.commit()
-            return cur.rowcount
+        return cur.rowcount
